@@ -45,6 +45,12 @@ struct Vec2 {
     Vec2(double X=0,double Y=0):x(X),y(Y){}
 };
 
+// =================== Additional Buffers ===================
+
+Vec3 normalBuffer[Ch][Cw];
+Vec3 colorBuffer[Ch][Cw];
+Vec3 posBuffer[Ch][Cw];
+
 // =================== Ambient, Lighting, Materials ===================
 const Vec3 GLOBAL_AMBIENT(0.2, 0.2, 0.2);
 
@@ -628,7 +634,10 @@ void DrawFilledTriangle(Image& img, const Triangle2D& tri, const vector<Light>& 
                 uint8_t G = (uint8_t)round(clamp01(lit.y)*255.0);
                 uint8_t B = (uint8_t)round(clamp01(lit.z)*255.0);
 
-                depthBuffer[sy][sx]=z;
+                depthBuffer[sy][sx] = z;
+                normalBuffer[sy][sx] = normalize(n_interp);
+                colorBuffer[sy][sx] = Vec3(R/255.0, G/255.0, B/255.0);
+                posBuffer[sy][sx] = pos_cam;
                 img.PutPixelScreen(sx,sy, Color(R,G,B));
             }
         }
@@ -713,8 +722,16 @@ int main(){
     lights.push_back(Light::Directional(Vec3(-0.5,-1.0,-0.3), Vec3(1.0,0.95,0.9), 1.0));
     lights.push_back(Light::Point(Vec3(0.0,2.0,2.0), Vec3(1.0,1.0,1.0), 1.0, 0.09, 0.032));
 
-    // Clear Z-buffer.
-    for(int y=0;y<Ch;y++) for(int x=0;x<Cw;x++) depthBuffer[y][x]=1e9;
+    // Clear depth-buffer.
+    for(int y=0;y<Ch;y++){
+        for(int x=0;x<Cw;x++){
+            depthBuffer[y][x] = 1e9;
+            normalBuffer[y][x] = Vec3(0,0,0);
+            colorBuffer[y][x] = Vec3(1,1,1); // white default
+            posBuffer[y][x] = Vec3(0,0,0);
+        }
+    }
+
 
     // Render.
     RenderMode mode = FILLED; // FILLED or WIREFRAME.
