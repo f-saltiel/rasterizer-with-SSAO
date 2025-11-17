@@ -37,6 +37,7 @@ struct Vec3 {
     Vec3 operator-() const { return Vec3(-x, -y, -z); }
     double dot(const Vec3&o)const{return x*o.x+y*o.y+z*o.z;}
     double length()const{return sqrt(x*x+y*y+z*z);}
+    Vec3 cross(const Vec3& o) const {return Vec3(y*o.z - z*o.y,z*o.x - x*o.z,x*o.y - y*o.x);}
 };
 static Vec3 normalize(const Vec3& v){ double L=v.length(); return (L<1e-12)?Vec3(0,0,0):v/L; }
 
@@ -49,6 +50,7 @@ const double SSAO_BIAS      = 0.025;  // bias to avoid self-occlusion
 Vec3 normalBuffer[Ch][Cw];
 Vec3 colorBuffer[Ch][Cw];
 Vec3 posBuffer[Ch][Cw];
+double ssaoBuffer[Ch][Cw];
 
 vector<Vec3> ssaoKernel;
 vector<Vec3> ssaoNoise;
@@ -800,6 +802,85 @@ void InitSSAO(){
     }
 }
 
+// =================== SSAO Implementation ===================
+
+void ComputeSSAO(){
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            Vec3 N = normalBuffer[y][x];
+            Vec3 P = posBuffer[y][x];
+
+            // skip background pixels
+            if (depthBuffer[y][x] > 1e8){
+                ssaoBuffer[y][x] = 1.0;
+                continue;
+            }
+
+            double occlusion = 0.0;
+
+            // choose a noise vector (4x4 tiled)
+            int nx = x % SSAO_NOISE_DIM;
+            int ny = y % SSAO_NOISE_DIM;
+            Vec3 noise = ssaoNoise[ny * SSAO_NOISE_DIM + nx];
+
+            // build tangent basis (TBN)
+            Vec3 tangent = normalize(noise - N * N.dot(noise));
+            Vec3 bitangent = normalize(N.cross(tangent));
+            // TBN matrix columns
+            Vec3 T = tangent;
+            Vec3 B = bitangent;
+
+            for(int i=0; i<SSAO_KERNEL_SIZE; i++){
+                Vec3 sample = ssaoKernel[i];
+
+                // rotate sample into tangent space
+                Vec3 sampleVec(
+                    T.x * sample.x + B.x * sample.y + N.x * sample.z,
+                    T.y * sample.x + B.y * sample.y + N.y * sample.z,
+                    T.z * sample.x + B.z * sample.y + N.z * sample.z
+                );
+
+                Vec3 samplePos = P + sampleVec * SSAO_RADIUS;
+
+                // project sample to screen space
+                double sx = (samplePos.x / -samplePos.z) * (Cw/2.0) + (Cw/2.0);
+                double sy = (samplePos.y / -samplePos.z) * (Ch/2.0) + (Ch/2.0);
+
+                int ix = (int)sx;
+                int iy = (int)sy;
+
+                // skip if outside screen
+                if(ix<0 || ix>=Cw || iy<0 || iy>=Ch) continue;
+
+                double sampleDepth = depthBuffer[iy][ix];
+                double rangeCheck = (P - samplePos).length();
+
+                if(sampleDepth < samplePos.z + SSAO_BIAS && rangeCheck < SSAO_RADIUS){
+                    occlusion += 1.0;
+                }
+            }
+
+            occlusion = 1.0 - (occlusion / SSAO_KERNEL_SIZE);
+            ssaoBuffer[y][x] = occlusion;
+        }
+    }
+}
+
+void SaveSSAOMask(const string& filename){
+    Image img(Cw, Ch, Color(0,0,0));
+
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            double v = ssaoBuffer[y][x];
+            v = max(0.0, min(1.0, v));
+            uint8_t g = (uint8_t)(v * 255.0);
+            img.PutPixelScreen(x, y, Color(g, g, g));
+        }
+    }
+
+    img.SavePPM(filename);
+}
+
 // =================== Main ===================
 int main(){
     cout<<"Starting 3D Rasterization Engine...\n";
@@ -857,6 +938,7 @@ int main(){
             normalBuffer[y][x] = Vec3(0,0,0);
             colorBuffer[y][x] = Vec3(1,1,1); // white default
             posBuffer[y][x] = Vec3(0,0,0);
+            ssaoBuffer[y][x] = 0.0;
         }
     }
 
@@ -870,6 +952,8 @@ int main(){
     SaveNormalMap("debug_normals.ppm");
     SavePositionMap("debug_positions.ppm");
 
+    ComputeSSAO();
+    SaveSSAOMask("debug_ssao_raw.ppm");
 
     // Save.
     img.SavePPM("rasterOutput.ppm");

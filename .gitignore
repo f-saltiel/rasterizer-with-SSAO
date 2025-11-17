@@ -3,3 +3,4 @@ debug_depth.ppm
 debug_normals.ppm
 debug_positions.ppm
 rasterOutput.ppm
+debug_ssao_raw.ppm
