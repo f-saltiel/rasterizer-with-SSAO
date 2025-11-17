@@ -909,15 +909,19 @@ int main(){
     // Sphere model.
     Model sphere_model = makeSphereModel("sphere", 1.0, 48, 96, Color(200, 200, 255));
 
+    // Skyscraper model.
+    Model skyscraper_model = readModelFromObj("skyscraper", "skyscraper.obj", Color(200, 200, 255));
+
     // Instances, per-instance materials. (ambient, diffuse, specular, shininess[1-128])
     vector<Instance> instances;
     Material shiny(0.2, 1.0, 0.8, 64.0);
     Material plastic(0.6, 0.9, 0.2, 32.0);
     Material matte(0.9, 0.7, 0.05, 4.0);
 
-    instances.emplace_back(&cube_model, Transform(0.3, Vec3(0,0,0), Vec3(-1, 0, 3)), matte);
-    instances.emplace_back(&cube_model, Transform(0.5, Vec3(0,30,0), Vec3( 0.5, 1, 5)), plastic);
-    instances.emplace_back(&sphere_model, Transform(0.7, Vec3(15, 0, 0), Vec3(0, -1, 4)), shiny);
+    //instances.emplace_back(&cube_model, Transform(0.3, Vec3(0,0,0), Vec3(-1, 0, 3)), matte);
+    //instances.emplace_back(&cube_model, Transform(0.5, Vec3(0,30,0), Vec3( 0.5, 1, 5)), plastic);
+    //instances.emplace_back(&sphere_model, Transform(0.7, Vec3(15, 0, 0), Vec3(0, -1, 4)), shiny);
+    instances.emplace_back(&skyscraper_model, Transform(0.05, Vec3(20,0,0), Vec3(0, -0.75, 4)), matte);
 
     // Camera.
     Camera camera(Vec3(0,0,0), Vec3(0,0,0));
