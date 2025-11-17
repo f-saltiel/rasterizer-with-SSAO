@@ -40,16 +40,23 @@ struct Vec3 {
 };
 static Vec3 normalize(const Vec3& v){ double L=v.length(); return (L<1e-12)?Vec3(0,0,0):v/L; }
 
-struct Vec2 {
-    double x,y;
-    Vec2(double X=0,double Y=0):x(X),y(Y){}
-};
-
-// =================== Additional Buffers ===================
+// =================== SSAO Settings ===================
+const int SSAO_KERNEL_SIZE = 32;      // number of sample directions
+const int SSAO_NOISE_DIM    = 4;      // 4x4 noise "texture"
+const double SSAO_RADIUS    = 0.5;    // sampling radius in view space
+const double SSAO_BIAS      = 0.025;  // bias to avoid self-occlusion
 
 Vec3 normalBuffer[Ch][Cw];
 Vec3 colorBuffer[Ch][Cw];
 Vec3 posBuffer[Ch][Cw];
+
+vector<Vec3> ssaoKernel;
+vector<Vec3> ssaoNoise;
+
+struct Vec2 {
+    double x,y;
+    Vec2(double X=0,double Y=0):x(X),y(Y){}
+};
 
 // =================== Ambient, Lighting, Materials ===================
 const Vec3 GLOBAL_AMBIENT(0.2, 0.2, 0.2);
@@ -763,10 +770,43 @@ void SavePositionMap(const string& filename){
     img.SavePPM(filename);
 }
 
+// =================== SSAO Kernel + Noise Initialization ===================
+
+double rand01(){ return rand() / (double)RAND_MAX; }
+
+void InitSSAO(){
+    ssaoKernel.clear();
+    ssaoKernel.reserve(SSAO_KERNEL_SIZE);
+
+    for(int i=0;i<SSAO_KERNEL_SIZE;i++){
+        // random sample in hemisphere (view space, z >= 0)
+        Vec3 sample(rand01()*2.0-1.0, rand01()*2.0-1.0, rand01());
+        sample = normalize(sample);
+
+        double scale = (double)i / (double)SSAO_KERNEL_SIZE;
+        // bias samples towards the origin (more dense near the center)
+        scale = 0.1 + 0.9*scale*scale;
+
+        ssaoKernel.push_back(sample * scale);
+    }
+
+    ssaoNoise.clear();
+    ssaoNoise.reserve(SSAO_NOISE_DIM * SSAO_NOISE_DIM);
+
+    for(int i=0;i<SSAO_NOISE_DIM * SSAO_NOISE_DIM;i++){
+        // random rotation in the tangent plane (z = 0)
+        Vec3 noise(rand01()*2.0-1.0, rand01()*2.0-1.0, 0.0);
+        ssaoNoise.push_back(noise);
+    }
+}
+
 // =================== Main ===================
 int main(){
     cout<<"Starting 3D Rasterization Engine...\n";
     Image img(Cw,Ch, Color(255,255,255));
+
+    srand(1337);      // fixed seed for reproducible SSAO
+    InitSSAO();       // build SSAO kernel + noise
 
     // Sample cube model.
     vector<Vec3> cube_vertices = {
