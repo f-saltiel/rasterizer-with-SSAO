@@ -1,0 +1,5 @@
+Rasterizer.exe
+debug_depth.ppm
+debug_normals.ppm
+debug_positions.ppm
+rasterOutput.ppm

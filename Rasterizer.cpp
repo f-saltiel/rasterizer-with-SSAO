@@ -361,8 +361,8 @@ Model makeSphereModel(const string& name, double radius, int latDiv, int lonDiv,
             int d = b + 1;
 
             // Two triangles per quad.
-            tris.emplace_back(a, b, c, baseColor);
-            tris.emplace_back(c, b, d, baseColor);
+            tris.emplace_back(a, c, b, baseColor);
+            tris.emplace_back(c, d, b, baseColor);
         }
     }
 
@@ -675,6 +675,94 @@ void RenderSceneWithClipping(Image& img,
          << " triangles culled (" << percent << "%)\n";
 }
 
+// =================== Debug Output ===================
+
+void SaveDepthMap(const string& filename){
+    Image img(Cw, Ch, Color(0,0,0));
+    double maxDepth = -1e9, minDepth = 1e9;
+
+    // Find min and max valid depth
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            double d = depthBuffer[y][x];
+            if (d < 1e8){
+                maxDepth = max(maxDepth, d);
+                minDepth = min(minDepth, d);
+            }
+        }
+    }
+
+    double range = maxDepth - minDepth;
+    if (range < 1e-9) range = 1.0;
+
+    // Write grayscale
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            double d = depthBuffer[y][x];
+            double norm = (d - minDepth) / range;
+            norm = max(0.0, min(1.0, norm));
+            uint8_t g = (uint8_t)(norm * 255.0);
+            img.PutPixelScreen(x, y, Color(g, g, g));
+        }
+    }
+
+    img.SavePPM(filename);
+}
+
+void SaveNormalMap(const string& filename){
+    Image img(Cw, Ch, Color(0,0,0));
+
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            Vec3 n = normalBuffer[y][x];
+            Vec3 mapped = (n + Vec3(1,1,1)) * 0.5; // map from [-1,1] to [0,1]
+            
+            uint8_t R = (uint8_t)(mapped.x * 255.0);
+            uint8_t G = (uint8_t)(mapped.y * 255.0);
+            uint8_t B = (uint8_t)(mapped.z * 255.0);
+
+            img.PutPixelScreen(x, y, Color(R, G, B));
+        }
+    }
+
+    img.SavePPM(filename);
+}
+
+void SavePositionMap(const string& filename){
+    Image img(Cw, Ch, Color(0,0,0));
+
+    // auto-find min/max for each channel
+    double minX=1e9, minY=1e9, minZ=1e9;
+    double maxX=-1e9, maxY=-1e9, maxZ=-1e9;
+
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            Vec3 p = posBuffer[y][x];
+            minX=min(minX,p.x); maxX=max(maxX,p.x);
+            minY=min(minY,p.y); maxY=max(maxY,p.y);
+            minZ=min(minZ,p.z); maxZ=max(maxZ,p.z);
+        }
+    }
+
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            Vec3 p = posBuffer[y][x];
+
+            double nx = (p.x - minX) / (maxX - minX + 1e-9);
+            double ny = (p.y - minY) / (maxY - minY + 1e-9);
+            double nz = (p.z - minZ) / (maxZ - minZ + 1e-9);
+
+            uint8_t R = (uint8_t)(nx * 255.0);
+            uint8_t G = (uint8_t)(ny * 255.0);
+            uint8_t B = (uint8_t)(nz * 255.0);
+
+            img.PutPixelScreen(x, y, Color(R, G, B));
+        }
+    }
+
+    img.SavePPM(filename);
+}
+
 // =================== Main ===================
 int main(){
     cout<<"Starting 3D Rasterization Engine...\n";
@@ -737,8 +825,14 @@ int main(){
     RenderMode mode = FILLED; // FILLED or WIREFRAME.
     RenderSceneWithClipping(img, instances, camera, planes, mode, lights);
 
+    // Debug.
+    SaveDepthMap("debug_depth.ppm");
+    SaveNormalMap("debug_normals.ppm");
+    SavePositionMap("debug_positions.ppm");
+
+
     // Save.
-    img.SavePPM("raster7.ppm");
-    cout<<"Rendering complete! Output saved as 'raster7.ppm'\n";
+    img.SavePPM("rasterOutput.ppm");
+    cout<<"Rendering complete! Output saved as 'rasterOutput.ppm'\n";
     return 0;
 }
