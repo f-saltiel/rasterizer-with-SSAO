@@ -51,6 +51,7 @@ Vec3 normalBuffer[Ch][Cw];
 Vec3 colorBuffer[Ch][Cw];
 Vec3 posBuffer[Ch][Cw];
 double ssaoBuffer[Ch][Cw];
+double ssaoBlurBuffer[Ch][Cw];
 
 vector<Vec3> ssaoKernel;
 vector<Vec3> ssaoNoise;
@@ -772,6 +773,19 @@ void SavePositionMap(const string& filename){
     img.SavePPM(filename);
 }
 
+void SaveSSAOMaskBlurred(const string& filename){
+    Image img(Cw, Ch, Color(0,0,0));
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            double v = ssaoBlurBuffer[y][x];
+            v = max(0.0, min(1.0, v));
+            uint8_t g = (uint8_t)(v * 255.0);
+            img.PutPixelScreen(x, y, Color(g,g,g));
+        }
+    }
+    img.SavePPM(filename);
+}
+
 // =================== SSAO Kernel + Noise Initialization ===================
 
 double rand01(){ return rand() / (double)RAND_MAX; }
@@ -866,6 +880,55 @@ void ComputeSSAO(){
     }
 }
 
+void ComputeSSAO_Blur(){
+    const int radius = 2;       // small blur radius
+    const double sigma_spatial = 2.0;    // spatial Gaussian
+    const double sigma_depth = 0.2;      // depth sensitivity
+
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            double sumWeights = 0.0;
+            double sumAO = 0.0;
+
+            double centerDepth = depthBuffer[y][x];
+            double centerAO = ssaoBuffer[y][x];
+
+            // Skip empty background pixels
+            if(centerDepth > 1e8){
+                ssaoBlurBuffer[y][x] = 1.0;
+                continue;
+            }
+
+            for(int dy=-radius; dy<=radius; dy++){
+                for(int dx=-radius; dx<=radius; dx++){
+                    int ix = x + dx;
+                    int iy = y + dy;
+
+                    if(ix<0 || ix>=Cw || iy<0 || iy>=Ch) continue;
+
+                    double neighborDepth = depthBuffer[iy][ix];
+                    double neighborAO = ssaoBuffer[iy][ix];
+
+                    // spatial weight
+                    double spatialDist2 = dx*dx + dy*dy;
+                    double w_spatial = exp(-(spatialDist2) / (2*sigma_spatial*sigma_spatial));
+
+                    // depth weight (edge-preserving)
+                    double depthDiff = fabs(neighborDepth - centerDepth);
+                    double w_depth = exp(-(depthDiff*depthDiff) / (2*sigma_depth*sigma_depth));
+
+                    double weight = w_spatial * w_depth;
+
+                    sumWeights += weight;
+                    sumAO += neighborAO * weight;
+                }
+            }
+
+            ssaoBlurBuffer[y][x] = sumAO / max(sumWeights, 1e-8);
+        }
+    }
+}
+
 void SaveSSAOMask(const string& filename){
     Image img(Cw, Ch, Color(0,0,0));
 
@@ -920,8 +983,8 @@ int main(){
 
     //instances.emplace_back(&cube_model, Transform(0.3, Vec3(0,0,0), Vec3(-1, 0, 3)), matte);
     //instances.emplace_back(&cube_model, Transform(0.5, Vec3(0,30,0), Vec3( 0.5, 1, 5)), plastic);
-    //instances.emplace_back(&sphere_model, Transform(0.7, Vec3(15, 0, 0), Vec3(0, -1, 4)), shiny);
-    instances.emplace_back(&skyscraper_model, Transform(0.05, Vec3(20,0,0), Vec3(0, -0.75, 4)), matte);
+    //instances.emplace_back(&sphere_model, Transform(0.7, Vec3(15,0,0), Vec3(0, -1, 4)), shiny);
+    instances.emplace_back(&skyscraper_model, Transform(0.05, Vec3(20,15,0), Vec3(0, -0.75, 4)), matte);
 
     // Camera.
     Camera camera(Vec3(0,0,0), Vec3(0,0,0));
@@ -958,6 +1021,9 @@ int main(){
 
     ComputeSSAO();
     SaveSSAOMask("debug_ssao_raw.ppm");
+
+    ComputeSSAO_Blur();
+    SaveSSAOMaskBlurred("debug_ssao_blur.ppm");
 
     // Save.
     img.SavePPM("rasterOutput.ppm");
