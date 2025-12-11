@@ -11,14 +11,14 @@
 using namespace std;
 
 // =================== Canvas / Projection ===================
-const int Cw = 400;
-const int Ch = 400;
+const int Cw = 1200;
+const int Ch = 1200;
 const double Vw = 1.0;
 const double Vh = 1.0;
 const double d  = 1.0;
 const double EPS = 1e-9;
 
-const bool ENABLE_BACKFACE_CULLING = true;
+const bool ENABLE_BACKFACE_CULLING = false;
 double depthBuffer[Ch][Cw];
 
 // =================== Basic Types ===================
@@ -44,8 +44,9 @@ static Vec3 normalize(const Vec3& v){ double L=v.length(); return (L<1e-12)?Vec3
 // =================== SSAO Settings ===================
 const int SSAO_KERNEL_SIZE = 32;      // number of sample directions
 const int SSAO_NOISE_DIM    = 4;      // 4x4 noise "texture"
-const double SSAO_RADIUS    = 0.5;    // sampling radius in view space
-const double SSAO_BIAS      = 0.025;  // bias to avoid self-occlusion
+const double SSAO_RADIUS    = 0.3;    // sampling radius in view space
+const double SSAO_BIAS      = 0.05;  // bias to avoid self-occlusion
+const double SSAO_STRENGTH  = 0.9; // 0 = off, 1 = full strength
 
 Vec3 normalBuffer[Ch][Cw];
 Vec3 colorBuffer[Ch][Cw];
@@ -62,7 +63,7 @@ struct Vec2 {
 };
 
 // =================== Ambient, Lighting, Materials ===================
-const Vec3 GLOBAL_AMBIENT(0.2, 0.2, 0.2);
+const Vec3 GLOBAL_AMBIENT(0.4, 0.4, 0.4);
 
 enum class LightType { POINT, DIRECTIONAL };
 
@@ -345,6 +346,44 @@ Model readModelFromObj(const string& name,const string& filePath, Color color){
             }
         }
     }
+    return Model(name, verts, tris);
+}
+
+Model makeSubdividedFloor(const string& name, double size, int divisions, Color color)
+{
+    vector<Vec3> verts;
+    vector<tuple<int,int,int,Color>> tris;
+
+    double half = size * 0.5;
+    double step = size / divisions;
+
+    // Build vertices
+    for (int z = 0; z <= divisions; z++){
+        for (int x = 0; x <= divisions; x++){
+            double px = -half + x * step;
+            double pz = -half + z * step;
+            verts.emplace_back(px, 0.0, pz);
+        }
+    }
+
+    // Build triangles
+    auto idx = [&](int x, int z){
+        return z * (divisions + 1) + x;
+    };
+
+    for (int z = 0; z < divisions; z++){
+        for (int x = 0; x < divisions; x++){
+            int v0 = idx(x, z);
+            int v1 = idx(x+1, z);
+            int v2 = idx(x+1, z+1);
+            int v3 = idx(x, z+1);
+
+            // Two triangles per quad
+            tris.emplace_back(v0, v2, v1, color);
+            tris.emplace_back(v0, v3, v2, color);
+        }
+    }
+
     return Model(name, verts, tris);
 }
 
@@ -638,6 +677,12 @@ void DrawFilledTriangle(Image& img, const Triangle2D& tri, const vector<Light>& 
                 Vec3 pos_cam( span_px[xi]/invZ, span_py[xi]/invZ, span_pz[xi]/invZ );
                 Vec3 n_interp( span_nx[xi]/invZ, span_ny[xi]/invZ, span_nz[xi]/invZ );
 
+                // Hard override floor normals
+                bool isFloor = (mat.ks == 0.0 && mat.shininess <= 1.0);
+                if(isFloor){
+                    n_interp = Vec3(0, 1, 0);
+                }
+
                 Vec3 base = ColorToVec3(tri.color);
                 Vec3 lit = ShadePhongAtPoint(pos_cam, n_interp, base, lights, mat);
                 uint8_t R = (uint8_t)round(clamp01(lit.x)*255.0);
@@ -830,6 +875,14 @@ void ComputeSSAO(){
                 continue;
             }
 
+            // if normal is zero, just leave it alone
+            if (N.length() < 1e-6){
+                ssaoBuffer[y][x] = 1.0;
+                continue;
+            }
+
+            N = normalize(N);
+
             double occlusion = 0.0;
 
             // choose a noise vector (4x4 tiled)
@@ -837,17 +890,23 @@ void ComputeSSAO(){
             int ny = y % SSAO_NOISE_DIM;
             Vec3 noise = ssaoNoise[ny * SSAO_NOISE_DIM + nx];
 
-            // build tangent basis (TBN)
-            Vec3 tangent = normalize(noise - N * N.dot(noise));
+            // build tangent basis (TBN) in view space
+            Vec3 tangent = noise - N * N.dot(noise);
+            if (tangent.length() < 1e-6) {
+                // fallback if noise is almost parallel to N
+                tangent = fabs(N.z) < 0.9 ? Vec3(0,0,1).cross(N)
+                                          : Vec3(1,0,0);
+            }
+            tangent   = normalize(tangent);
             Vec3 bitangent = normalize(N.cross(tangent));
-            // TBN matrix columns
+
             Vec3 T = tangent;
             Vec3 B = bitangent;
 
             for(int i=0; i<SSAO_KERNEL_SIZE; i++){
                 Vec3 sample = ssaoKernel[i];
 
-                // rotate sample into tangent space
+                // rotate sample into tangent space (view space)
                 Vec3 sampleVec(
                     T.x * sample.x + B.x * sample.y + N.x * sample.z,
                     T.y * sample.x + B.y * sample.y + N.y * sample.z,
@@ -856,34 +915,42 @@ void ComputeSSAO(){
 
                 Vec3 samplePos = P + sampleVec * SSAO_RADIUS;
 
-                // project sample to screen space
-                double sx = (samplePos.x / -samplePos.z) * (Cw/2.0) + (Cw/2.0);
-                double sy = (samplePos.y / -samplePos.z) * (Ch/2.0) + (Ch/2.0);
+                // discard samples behind or on the camera plane
+                if (samplePos.z <= EPS) continue;
 
-                int ix = (int)sx;
-                int iy = (int)sy;
+                // project using the same projection as the main rasterizer
+                Vec2 sp = ProjectVertex(samplePos);
+                int ix = (int)std::round(sp.x);
+                int iy = (int)std::round(sp.y);
 
                 // skip if outside screen
                 if(ix<0 || ix>=Cw || iy<0 || iy>=Ch) continue;
 
                 double sampleDepth = depthBuffer[iy][ix];
-                double rangeCheck = (P - samplePos).length();
+                if (sampleDepth > 1e8) continue; // background there
 
-                if(sampleDepth < samplePos.z + SSAO_BIAS && rangeCheck < SSAO_RADIUS){
+                // distance between current point and sample point in view space
+                double rangeCheck = (P - samplePos).length();
+                if (rangeCheck > SSAO_RADIUS) continue;
+
+                // occlusion if there is geometry closer than our sample point
+                // along that ray
+                if (sampleDepth + SSAO_BIAS < samplePos.z){
                     occlusion += 1.0;
                 }
             }
 
             occlusion = 1.0 - (occlusion / SSAO_KERNEL_SIZE);
+            occlusion = std::max(0.0, std::min(1.0, occlusion));
             ssaoBuffer[y][x] = occlusion;
         }
     }
 }
 
 void ComputeSSAO_Blur(){
-    const int radius = 2;       // small blur radius
-    const double sigma_spatial = 2.0;    // spatial Gaussian
-    const double sigma_depth = 0.2;      // depth sensitivity
+    const int radius = 4;       // small blur radius
+    const double sigma_spatial = 3.0;    // spatial Gaussian
+    const double sigma_depth = 0.5;      // depth sensitivity
 
     for(int y=0; y<Ch; y++){
         for(int x=0; x<Cw; x++){
@@ -944,6 +1011,46 @@ void SaveSSAOMask(const string& filename){
     img.SavePPM(filename);
 }
 
+void SaveFinalCombined(const string& filename){
+    Image img(Cw, Ch, Color(0,0,0));
+
+    for(int y=0; y<Ch; y++){
+        for(int x=0; x<Cw; x++){
+            double ao = ssaoBlurBuffer[y][x];
+            ao = max(0.0, min(1.0, ao));
+
+            Vec3 base = colorBuffer[y][x]; // already in [0,1]
+
+            // if it's background, just keep base color
+            if (depthBuffer[y][x] > 1e8){
+                uint8_t R = (uint8_t)(base.x * 255.0);
+                uint8_t G = (uint8_t)(base.y * 255.0);
+                uint8_t B = (uint8_t)(base.z * 255.0);
+                img.PutPixelScreen(x, y, Color(R,G,B));
+                continue;
+            }
+
+            // ao is "how much light remains"
+            // blend between no-SSAO (factor=1) and full AO (factor=ao)
+            double factor = (1.0 - SSAO_STRENGTH) + SSAO_STRENGTH * ao;
+
+            Vec3 shaded(
+                base.x * factor,
+                base.y * factor,
+                base.z * factor
+            );
+
+            uint8_t R = (uint8_t)(shaded.x * 255.0);
+            uint8_t G = (uint8_t)(shaded.y * 255.0);
+            uint8_t B = (uint8_t)(shaded.z * 255.0);
+
+            img.PutPixelScreen(x, y, Color(R, G, B));
+        }
+    }
+
+    img.SavePPM(filename);
+}
+
 // =================== Main ===================
 int main(){
     cout<<"Starting 3D Rasterization Engine...\n";
@@ -969,25 +1076,35 @@ int main(){
     };
     Model cube_model("cube", cube_vertices, cube_tris);
 
+    // Floor model.
+    Model floor_model = makeSubdividedFloor("floor", 20.0, 16, Color(200,200,200));
+
     // Sphere model.
     Model sphere_model = makeSphereModel("sphere", 1.0, 48, 96, Color(200, 200, 255));
 
-    // Skyscraper model.
-    Model skyscraper_model = readModelFromObj("skyscraper", "skyscraper.obj", Color(200, 200, 255));
+    // Object models.
+    Model blue_skyscraper_model = readModelFromObj("skyscraper", "models/skyscraper.obj", Color(0, 0, 255));
+    Model green_skyscraper_model = readModelFromObj("skyscraper", "models/skyscraper.obj", Color(0, 255, 0));
+    Model red_skyscraper_model = readModelFromObj("skyscraper", "models/skyscraper.obj", Color(255, 0, 0));
+    Model cessna_model = readModelFromObj("cessna", "models/cessna.obj", Color(255, 0, 255));
+    Model car_model = readModelFromObj("car", "models/minicooper.obj", Color(0, 255, 255));
 
     // Instances, per-instance materials. (ambient, diffuse, specular, shininess[1-128])
     vector<Instance> instances;
     Material shiny(0.2, 1.0, 0.8, 64.0);
     Material plastic(0.6, 0.9, 0.2, 32.0);
     Material matte(0.9, 0.7, 0.05, 4.0);
+    Material floorMat(1, 0.5, 0.0, 1.0);
 
-    //instances.emplace_back(&cube_model, Transform(0.3, Vec3(0,0,0), Vec3(-1, 0, 3)), matte);
-    //instances.emplace_back(&cube_model, Transform(0.5, Vec3(0,30,0), Vec3( 0.5, 1, 5)), plastic);
-    //instances.emplace_back(&sphere_model, Transform(0.7, Vec3(15,0,0), Vec3(0, -1, 4)), shiny);
-    instances.emplace_back(&skyscraper_model, Transform(0.05, Vec3(20,15,0), Vec3(0, -0.75, 4)), matte);
+    instances.emplace_back(&red_skyscraper_model, Transform(0.06, Vec3(0,30,0), Vec3(-2.5, -1.75, 7)), plastic);
+    instances.emplace_back(&green_skyscraper_model, Transform(0.06, Vec3(0,0,0), Vec3(0, -1.75, 8)), shiny);
+    instances.emplace_back(&blue_skyscraper_model, Transform(0.06, Vec3(0,-30,0), Vec3(2.5, -1.75, 7)), shiny);
+    instances.emplace_back(&cessna_model, Transform(0.025, Vec3(65,130,60), Vec3(1.2, 0.8, 6)), matte);
+    instances.emplace_back(&car_model, Transform(0.01, Vec3(90,0,120), Vec3(-0.5, -2.25, 5.5)), plastic);
+    instances.emplace_back(&floor_model, Transform(100, Vec3(0,0,0), Vec3(0, -2.25, 9)), floorMat);
 
     // Camera.
-    Camera camera(Vec3(0,0,0), Vec3(0,0,0));
+    Camera camera(Vec3(0,0.75,0), Vec3(-15,0,0));
 
     // Frustum planes.
     double nearz = 0.1;
@@ -995,8 +1112,8 @@ int main(){
 
     // Lights.
     vector<Light> lights;
-    lights.push_back(Light::Directional(Vec3(-0.5,-1.0,-0.3), Vec3(1.0,0.95,0.9), 1.0));
-    lights.push_back(Light::Point(Vec3(0.0,2.0,2.0), Vec3(1.0,1.0,1.0), 1.0, 0.09, 0.032));
+    lights.push_back(Light::Directional(Vec3(-0.4,-1.0,-0.2), Vec3(1.0, 1.0, 1.0), 1.0));
+    lights.push_back(Light::Point(Vec3(0.0,1.5,4.0), Vec3(1.0,1.0,1.0), 0.5, 0.05, 0.005));
 
     // Clear depth-buffer.
     for(int y=0;y<Ch;y++){
@@ -1015,18 +1132,21 @@ int main(){
     RenderSceneWithClipping(img, instances, camera, planes, mode, lights);
 
     // Debug.
-    SaveDepthMap("debug_depth.ppm");
-    SaveNormalMap("debug_normals.ppm");
-    SavePositionMap("debug_positions.ppm");
+    SaveDepthMap("debug/debug_depth.ppm");
+    SaveNormalMap("debug/debug_normals.ppm");
+    SavePositionMap("debug/debug_positions.ppm");
 
     ComputeSSAO();
-    SaveSSAOMask("debug_ssao_raw.ppm");
+    SaveSSAOMask("debug/debug_ssao_raw.ppm");
 
     ComputeSSAO_Blur();
-    SaveSSAOMaskBlurred("debug_ssao_blur.ppm");
+    SaveSSAOMaskBlurred("debug/debug_ssao_blur.ppm");
+
+    
 
     // Save.
+    SaveFinalCombined("final_ssao_render.ppm");
     img.SavePPM("rasterOutput.ppm");
-    cout<<"Rendering complete! Output saved as 'rasterOutput.ppm'\n";
+    cout<<"Rendering complete! Output saved as ppm.\n";
     return 0;
 }
